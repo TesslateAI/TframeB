@@ -27,10 +27,11 @@ class Flow:
             raise TypeError("Flow step must be an agent name (str) or a BasePattern instance.")
         self.steps.append(step)
         logger.debug(f"Flow '{self.flow_name}': Added step '{str(step)}'. Total steps: {len(self.steps)}.")
-        return self # For chaining
+        return self
 
     async def execute(self, initial_input: Message, app_runtime: 'TFrameXRuntimeContext',
-                      initial_shared_data: Optional[Dict[str, Any]] = None) -> FlowContext:
+                      initial_shared_data: Optional[Dict[str, Any]] = None,
+                      flow_template_vars: Optional[Dict[str, Any]] = None) -> FlowContext: # NEW
         """
         Executes the flow with the given initial input and runtime context.
         Returns the final FlowContext after all steps.
@@ -38,6 +39,9 @@ class Flow:
         logger.info(f"Executing Flow '{self.flow_name}' with {len(self.steps)} steps. Initial input: {str(initial_input.content)[:50]}...")
         
         flow_ctx = FlowContext(initial_input=initial_input, shared_data=initial_shared_data)
+        # Agent call kwargs will carry template_vars if provided
+        agent_call_kwargs = {"template_vars": flow_template_vars} if flow_template_vars else {}
+
 
         for i, step in enumerate(self.steps):
             step_name = str(step) if isinstance(step, BasePattern) else step
@@ -45,17 +49,18 @@ class Flow:
             
             try:
                 if isinstance(step, str): # Agent name
-                    output_message = await app_runtime.call_agent(step, flow_ctx.current_message)
+                    # Pass agent_call_kwargs (which includes template_vars) to call_agent
+                    output_message = await app_runtime.call_agent(step, flow_ctx.current_message, **agent_call_kwargs)
                     flow_ctx.update_current_message(output_message)
-                elif isinstance(step, BasePattern): # Pattern instance
-                    # Patterns are responsible for updating flow_ctx.current_message internally
-                    flow_ctx = await step.execute(flow_ctx, app_runtime) 
-                else: # Should not happen due to add_step validation
+                elif isinstance(step, BasePattern):
+                    # Patterns need to be aware of flow_template_vars if they call agents directly
+                    # Pass agent_call_kwargs to pattern's execute method
+                    flow_ctx = await step.execute(flow_ctx, app_runtime, agent_call_kwargs=agent_call_kwargs)
+                else:
                     raise TypeError(f"Invalid step type in flow '{self.flow_name}': {type(step)}")
 
                 logger.info(f"Flow '{self.flow_name}' - Step {i+1} ('{step_name}') completed. Output: {str(flow_ctx.current_message.content)[:50]}...")
 
-                # Check for early exit signal from shared_data if needed (e.g., flow_ctx.shared_data.get("STOP_FLOW"))
                 if flow_ctx.shared_data.get("STOP_FLOW", False):
                     logger.info(f"Flow '{self.flow_name}' - STOP_FLOW signal received. Halting execution.")
                     break
@@ -64,7 +69,6 @@ class Flow:
                 logger.error(f"Error during Flow '{self.flow_name}' at step '{step_name}': {e}", exc_info=True)
                 error_msg = Message(role="assistant", content=f"Error in flow '{self.flow_name}' at step '{step_name}': {e}")
                 flow_ctx.update_current_message(error_msg)
-                # Decide if flow should halt on error or continue (for now, it halts by returning)
                 return flow_ctx
         
         logger.info(f"Flow '{self.flow_name}' completed. Final output: {str(flow_ctx.current_message.content)[:50]}...")

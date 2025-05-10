@@ -3,47 +3,46 @@ from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any, Union
 
 from tframex.llms import BaseLLMWrapper
-from tframex.tools import Tool
+from tframex.tools import Tool, ToolDefinition # Added ToolDefinition
 from tframex.memory import BaseMemoryStore, InMemoryMemoryStore
 from tframex.primitives import Message
 
 logger = logging.getLogger(__name__)
-
-# --- Dedicated Deep Debug Logger ---
-# This logger will always output, regardless of the main application's logging level for "tframex"
-# This is for developers of/with the library to trace internal agent flow.
-# Users can choose to see these by configuring a handler for "tframex.agent_internal_debug"
 agent_internal_debug_logger = logging.getLogger("tframex.agent_internal_debug")
-# To ensure it always outputs if a handler is attached to it or its parents,
-# set its level to DEBUG and ensure it propagates. Or, add a specific handler here.
-# For simplicity, we'll assume users will configure a handler if they want to see these.
-# If no handler is configured for this specific logger or its parents (up to root),
-# and the root logger's level is INFO, these messages won't show by default, which is fine.
-# If a developer wants to see them, they can do:
-# logging.basicConfig(level=logging.DEBUG) # or
-# logging.getLogger("tframex.agent_internal_debug").setLevel(logging.DEBUG)
-# logging.getLogger("tframex.agent_internal_debug").addHandler(logging.StreamHandler())
-agent_internal_debug_logger.setLevel(logging.DEBUG) # Process messages at DEBUG level
-# agent_internal_debug_logger.propagate = True # Default is True
+agent_internal_debug_logger.setLevel(logging.DEBUG)
 
 
 class BaseAgent(ABC):
-    def __init__(self, 
-                 agent_id: str, # Unique ID for this instance of the agent
+    def __init__(self,
+                 agent_id: str,
+                 description: Optional[str] = None, # NEW
                  llm: Optional[BaseLLMWrapper] = None,
                  tools: Optional[List[Tool]] = None,
                  memory: Optional[BaseMemoryStore] = None,
                  system_prompt_template: Optional[str] = None,
-                 **config: Any): # For other agent-specific configurations
+                 callable_agent_definitions: Optional[List[ToolDefinition]] = None, # NEW
+                 **config: Any):
         self.agent_id = agent_id
+        self.description = description or f"Agent performing its designated role: {agent_id.split('_ctx')[0]}" # NEW, cleaner default
         self.llm = llm
         self.tools: Dict[str, Tool] = {tool.name: tool for tool in tools} if tools else {}
         self.memory: BaseMemoryStore = memory or InMemoryMemoryStore()
         self.system_prompt_template = system_prompt_template
+        # Store callable agent definitions if this agent is a supervisor
+        self.callable_agent_definitions: List[ToolDefinition] = callable_agent_definitions or [] # NEW
         self.config = config
-        
-        agent_internal_debug_logger.debug(f"[{self.agent_id}] BaseAgent.__init__ called. LLM: {llm.model_id if llm else 'None'}. Tools: {list(self.tools.keys())}. System Prompt: {bool(system_prompt_template)}. Config: {config}")
-        logger.info(f"Agent '{agent_id}' initialized. LLM: {llm.model_id if llm else 'None'}. Tools: {list(self.tools.keys())}.")
+
+        agent_internal_debug_logger.debug(
+            f"[{self.agent_id}] BaseAgent.__init__ called. Description: '{self.description}'. "
+            f"LLM: {llm.model_id if llm else 'None'}. Tools: {list(self.tools.keys())}. "
+            f"Callable Agents: {[cad.function['name'] for cad in self.callable_agent_definitions]}. " # NEW log
+            f"System Prompt: {bool(system_prompt_template)}. Config: {config}"
+        )
+        logger.info(
+            f"Agent '{agent_id}' initialized. LLM: {llm.model_id if llm else 'None'}. "
+            f"Tools: {list(self.tools.keys())}. "
+            f"Callable Agents: {[cad.function['name'] for cad in self.callable_agent_definitions]}." # NEW log
+        )
 
 
     def _render_system_prompt(self, **kwargs_for_template: Any) -> Optional[Message]:
@@ -52,21 +51,40 @@ class BaseAgent(ABC):
             agent_internal_debug_logger.debug(f"[{self.agent_id}] No system_prompt_template defined.")
             return None
         try:
-            content = self.system_prompt_template.format(**kwargs_for_template)
+            # Prepare description of available tools and callable agents for the system prompt if placeholders exist
+            prompt_format_args = kwargs_for_template.copy()
+
+            tool_descriptions = "\n".join(
+                [f"- {name}: {tool.description}" for name, tool in self.tools.items()]
+            )
+            prompt_format_args["available_tools_descriptions"] = tool_descriptions or "No tools available."
+
+            callable_agent_tool_descs = "\n".join(
+                [f"- {cad.function['name']}: {cad.function['description']}" for cad in self.callable_agent_definitions]
+            )
+            prompt_format_args["available_agents_descriptions"] = callable_agent_tool_descs or "No callable agents available."
+
+
+            content = self.system_prompt_template.format(**prompt_format_args)
             msg = Message(role="system", content=content)
             agent_internal_debug_logger.debug(f"[{self.agent_id}] Rendered system prompt: {msg}")
             return msg
         except KeyError as e:
             agent_internal_debug_logger.warning(f"[{self.agent_id}] Missing key '{e}' for system_prompt_template. Template: '{self.system_prompt_template}'")
             logger.warning(f"Agent '{self.agent_id}': Missing key '{e}' for system_prompt_template. Template: '{self.system_prompt_template}'")
-            # Return unformatted, still useful for debugging
-            return Message(role="system", content=self.system_prompt_template) 
+            # Return unformatted, still useful for debugging, but try a simple format first
+            try:
+                content = self.system_prompt_template.format(**kwargs_for_template) # Try without tool/agent descriptions
+                return Message(role="system", content=content)
+            except KeyError: # Still fails, return raw
+                 return Message(role="system", content=self.system_prompt_template)
+
 
     @abstractmethod
     async def run(self, input_message: Union[str, Message], **kwargs: Any) -> Message:
         """
         Primary execution method. Takes input, returns a single Message from the assistant.
-        kwargs can be used for runtime overrides or additional context.
+        kwargs can be used for runtime overrides or additional context, like 'template_vars'.
         """
         agent_internal_debug_logger.debug(f"[{self.agent_id}] Abstract run method invoked with input: {input_message}, kwargs: {kwargs}. (Implementation specific logs will follow)")
         pass
