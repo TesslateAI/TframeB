@@ -1,5 +1,5 @@
 from typing import Any, Dict, Optional
-from .primitives import Message
+from ..models.primitives import Message
 
 class FlowContext:
     """

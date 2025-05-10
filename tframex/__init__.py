@@ -9,17 +9,18 @@ from dotenv import load_dotenv
 # load_dotenv(find_dotenv(usecwd=True, raise_error_if_not_found=False))
 
 
-from .primitives import Message, MessageChunk, ToolCall, FunctionCall, ToolParameterProperty, ToolParameters, ToolDefinition
-from .llms import BaseLLMWrapper, OpenAIChatLLM
-from .tools import Tool
-from .memory import BaseMemoryStore, InMemoryMemoryStore
+from .models.primitives import Message, MessageChunk, ToolCall, FunctionCall, ToolParameterProperty, ToolParameters, ToolDefinition
+from .util.llms import BaseLLMWrapper, OpenAIChatLLM
+from .util.tools import Tool
+from .util.memory import BaseMemoryStore, InMemoryMemoryStore
+from .util.engine import Engine
 from .agents.base import BaseAgent
 from .agents.llm_agent import LLMAgent
 from .agents.tool_agent import ToolAgent # Ensure ToolAgent is here if used
 
-from .flow_context import FlowContext # NEW
-from .patterns import BasePattern, SequentialPattern, ParallelPattern, RouterPattern, DiscussionPattern # NEW
-from .flows import Flow # NEW
+from .flows.flow_context import FlowContext # NEW
+from .patterns.patterns import BasePattern, SequentialPattern, ParallelPattern, RouterPattern, DiscussionPattern # NEW
+from .flows.flows import Flow # NEW
 
 from .app import TFrameXApp, TFrameXRuntimeContext
 
@@ -50,5 +51,5 @@ __all__ = [
     "BasePattern", "SequentialPattern", "ParallelPattern", "RouterPattern", "DiscussionPattern", # NEW
     "Flow", # NEW
     
-    "TFrameXApp", "TFrameXRuntimeContext"
+    "TFrameXApp", "TFrameXRuntimeContext", "Engine"
 ]

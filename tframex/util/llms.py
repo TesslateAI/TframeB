@@ -5,7 +5,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Union, List, Dict, Any, Literal, overload, Optional
 
-from tframex.primitives import Message, MessageChunk, ToolCall, FunctionCall
+from tframex.models.primitives import Message, MessageChunk, ToolCall, FunctionCall
 
 logger = logging.getLogger(__name__)
 

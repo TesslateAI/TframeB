@@ -3,10 +3,10 @@ import json
 from typing import Optional, List, Union, Dict, Any
 
 from .base import BaseAgent
-from tframex.llms import BaseLLMWrapper
-from tframex.tools import Tool, ToolDefinition
-from tframex.memory import BaseMemoryStore
-from tframex.primitives import Message, ToolCall, FunctionCall
+from tframex.util.llms import BaseLLMWrapper
+from tframex.util.tools import Tool, ToolDefinition
+from tframex.util.memory import BaseMemoryStore
+from tframex.models.primitives import Message, ToolCall, FunctionCall
 # Forward declaration for TFrameXRuntimeContext
 if False: # TYPE_CHECKING
     from tframex.app import TFrameXRuntimeContext

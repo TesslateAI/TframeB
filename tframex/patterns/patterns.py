@@ -3,11 +3,9 @@ import logging
 from abc import ABC, abstractmethod
 from typing import List, Union, Dict, Any, Tuple, Optional
 
-from .primitives import Message, ToolCall
-from .flow_context import FlowContext
-if False: # TYPE_CHECKING:
-    from .app import TFrameXRuntimeContext
-
+from ..models.primitives import Message, ToolCall
+from ..flows.flow_context import FlowContext
+from ..util.engine import Engine
 logger = logging.getLogger(__name__)
 
 class BasePattern(ABC):
@@ -16,7 +14,7 @@ class BasePattern(ABC):
         logger.debug(f"Pattern '{self.pattern_name}' initialized.")
 
     @abstractmethod
-    async def execute(self, flow_ctx: FlowContext, app_runtime: 'TFrameXRuntimeContext',
+    async def execute(self, flow_ctx: FlowContext, engine: Engine,
                       agent_call_kwargs: Optional[Dict[str, Any]] = None) -> FlowContext: # NEW agent_call_kwargs
         pass
 
@@ -29,7 +27,7 @@ class SequentialPattern(BasePattern):
         super().__init__(pattern_name)
         self.steps = steps
 
-    async def execute(self, flow_ctx: FlowContext, app_runtime: 'TFrameXRuntimeContext',
+    async def execute(self, flow_ctx: FlowContext, engine: Engine,
                       agent_call_kwargs: Optional[Dict[str, Any]] = None) -> FlowContext: # NEW
         logger.info(f"Executing SequentialPattern '{self.pattern_name}' with {len(self.steps)} steps. Input: {str(flow_ctx.current_message.content)[:50]}...")
         effective_agent_call_kwargs = agent_call_kwargs or {}
@@ -40,7 +38,7 @@ class SequentialPattern(BasePattern):
             
             if isinstance(step, str): # Agent name
                 try:
-                    output_message = await app_runtime.call_agent(step, flow_ctx.current_message, **effective_agent_call_kwargs)
+                    output_message = await engine.call_agent(step, flow_ctx.current_message, **effective_agent_call_kwargs)
                     flow_ctx.update_current_message(output_message)
                 except Exception as e: # ... error handling ...
                     logger.error(f"Error in SequentialPattern '{self.pattern_name}' calling agent '{step}': {e}", exc_info=True)
@@ -49,7 +47,7 @@ class SequentialPattern(BasePattern):
                     return flow_ctx
             elif isinstance(step, BasePattern): # Nested pattern
                 try:
-                    flow_ctx = await step.execute(flow_ctx, app_runtime, agent_call_kwargs=effective_agent_call_kwargs) # Pass kwargs
+                    flow_ctx = await step.execute(flow_ctx, engine, agent_call_kwargs=effective_agent_call_kwargs) # Pass kwargs
                 except Exception as e: # ... error handling ...
                     logger.error(f"Error in SequentialPattern '{self.pattern_name}' executing nested pattern '{step.pattern_name}': {e}", exc_info=True)
                     error_msg = Message(role="assistant", content=f"Error executing nested pattern '{step.pattern_name}' in sequence '{self.pattern_name}': {e}")
@@ -69,7 +67,7 @@ class ParallelPattern(BasePattern):
         super().__init__(pattern_name)
         self.tasks = tasks
 
-    async def execute(self, flow_ctx: FlowContext, app_runtime: 'TFrameXRuntimeContext',
+    async def execute(self, flow_ctx: FlowContext, engine: Engine,
                       agent_call_kwargs: Optional[Dict[str, Any]] = None) -> FlowContext: # NEW
         logger.info(f"Executing ParallelPattern '{self.pattern_name}' with {len(self.tasks)} tasks. Input: {str(flow_ctx.current_message.content)[:50]}...")
         initial_input_msg = flow_ctx.current_message
@@ -82,10 +80,10 @@ class ParallelPattern(BasePattern):
             task_identifiers.append(task_name)
 
             if isinstance(task_item, str): # Agent name
-                coroutines.append(app_runtime.call_agent(task_item, initial_input_msg, **effective_agent_call_kwargs))
+                coroutines.append(engine.call_agent(task_item, initial_input_msg, **effective_agent_call_kwargs))
             elif isinstance(task_item, BasePattern):
                 branch_flow_ctx = FlowContext(initial_input=initial_input_msg, shared_data=flow_ctx.shared_data.copy())
-                coroutines.append(task_item.execute(branch_flow_ctx, app_runtime, agent_call_kwargs=effective_agent_call_kwargs)) # Pass kwargs
+                coroutines.append(task_item.execute(branch_flow_ctx, engine, agent_call_kwargs=effective_agent_call_kwargs)) # Pass kwargs
             else: # ... error handling ...
                 async def error_coro(): return Message(role="assistant", content=f"Invalid task type in parallel pattern '{self.pattern_name}'.")
                 coroutines.append(error_coro())

@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logging.getLogger("tframex").setLevel(logging.INFO)
 # For more detailed logs:
-# logging.getLogger("tframex.agents.llm_agent").setLevel(logging.DEBUG)
+logging.getLogger("tframex.agents.llm_agent").setLevel(logging.DEBUG)
 # logging.getLogger("tframex.agents.base").setLevel(logging.DEBUG)
 # logging.getLogger("tframex.app").setLevel(logging.DEBUG)
 

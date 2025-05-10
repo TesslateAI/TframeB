@@ -1,12 +1,10 @@
 import logging
 from typing import List, Union, Optional, Dict, Any
 
-from .primitives import Message
+from ..models.primitives import Message
 from .flow_context import FlowContext
-from .patterns import BasePattern
-# Forward declaration for TFrameXRuntimeContext
-if False: #TYPE_CHECKING:
-    from .app import TFrameXRuntimeContext
+from ..patterns.patterns import BasePattern
+from ..util.engine import Engine
 
 
 logger = logging.getLogger(__name__)
@@ -29,7 +27,7 @@ class Flow:
         logger.debug(f"Flow '{self.flow_name}': Added step '{str(step)}'. Total steps: {len(self.steps)}.")
         return self
 
-    async def execute(self, initial_input: Message, app_runtime: 'TFrameXRuntimeContext',
+    async def execute(self, initial_input: Message, engine: Engine,
                       initial_shared_data: Optional[Dict[str, Any]] = None,
                       flow_template_vars: Optional[Dict[str, Any]] = None) -> FlowContext: # NEW
         """
@@ -50,12 +48,12 @@ class Flow:
             try:
                 if isinstance(step, str): # Agent name
                     # Pass agent_call_kwargs (which includes template_vars) to call_agent
-                    output_message = await app_runtime.call_agent(step, flow_ctx.current_message, **agent_call_kwargs)
+                    output_message = await engine.call_agent(step, flow_ctx.current_message, **agent_call_kwargs)
                     flow_ctx.update_current_message(output_message)
                 elif isinstance(step, BasePattern):
                     # Patterns need to be aware of flow_template_vars if they call agents directly
                     # Pass agent_call_kwargs to pattern's execute method
-                    flow_ctx = await step.execute(flow_ctx, app_runtime, agent_call_kwargs=agent_call_kwargs)
+                    flow_ctx = await step.execute(flow_ctx, engine, agent_call_kwargs=agent_call_kwargs)
                 else:
                     raise TypeError(f"Invalid step type in flow '{self.flow_name}': {type(step)}")
 

@@ -3,10 +3,10 @@ import json # Added
 from typing import Union, Any, List, Optional, Dict # Added List, Optional, Dict
 
 from .base import BaseAgent
-from tframex.tools import Tool
-from tframex.primitives import Message
-from tframex.llms import BaseLLMWrapper # Added
-from tframex.memory import BaseMemoryStore # Added
+from tframex.util.tools import Tool
+from tframex.models.primitives import Message
+from tframex.util.llms import BaseLLMWrapper # Added
+from tframex.util.memory import BaseMemoryStore # Added
 
 logger = logging.getLogger(__name__)
 

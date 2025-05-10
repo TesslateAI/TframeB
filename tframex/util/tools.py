@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Callable, Dict, Any, Optional, List, Coroutine
 
-from tframex.primitives import ToolParameterProperty, ToolParameters, ToolDefinition
+from tframex.models.primitives import ToolParameterProperty, ToolParameters, ToolDefinition
 
 logger = logging.getLogger(__name__)
 

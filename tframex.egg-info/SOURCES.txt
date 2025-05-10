@@ -1,13 +1,7 @@
+README.md
 setup.py
 tframex/__init__.py
 tframex/app.py
-tframex/flow_context.py
-tframex/flows.py
-tframex/llms.py
-tframex/memory.py
-tframex/patterns.py
-tframex/primitives.py
-tframex/tools.py
 tframex.egg-info/PKG-INFO
 tframex.egg-info/SOURCES.txt
 tframex.egg-info/dependency_links.txt

@@ -3,10 +3,10 @@ import re # For stripping think tags
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any, Union
 
-from tframex.llms import BaseLLMWrapper
-from tframex.tools import Tool, ToolDefinition
-from tframex.memory import BaseMemoryStore, InMemoryMemoryStore
-from tframex.primitives import Message
+from tframex.util.llms import BaseLLMWrapper
+from tframex.util.tools import Tool, ToolDefinition
+from tframex.util.memory import BaseMemoryStore, InMemoryMemoryStore
+from tframex.models.primitives import Message
 
 logger = logging.getLogger(__name__)
 agent_internal_debug_logger = logging.getLogger("tframex.agent_internal_debug")

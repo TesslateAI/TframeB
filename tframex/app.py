@@ -4,17 +4,21 @@ import logging
 import os # Already present, used in __init__
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Union, Type
 
-from .llms import BaseLLMWrapper
-from .tools import Tool, ToolParameters, ToolParameterProperty, ToolDefinition # ToolDefinition already present
-from .memory import BaseMemoryStore, InMemoryMemoryStore
-from .primitives import Message, MessageChunk # MessageChunk already present
+from .util.llms import BaseLLMWrapper
+from .util.tools import Tool, ToolParameters, ToolParameterProperty, ToolDefinition # ToolDefinition already present
+from .util.memory import BaseMemoryStore, InMemoryMemoryStore
+from .models.primitives import Message, MessageChunk # MessageChunk already present
 from .agents.llm_agent import LLMAgent
 from .agents.base import BaseAgent
 from .agents.tool_agent import ToolAgent
-from .flows import Flow
-from .patterns import BasePattern
-from .flow_context import FlowContext
+from .flows.flows import Flow
+from .patterns.patterns import BasePattern
+from .flows.flow_context import FlowContext
+from .util.logging.logging_config import setup_logging
+from .util.engine import Engine
 
+# Setup colored logging
+setup_logging(level=logging.INFO)
 
 logger = logging.getLogger("tframex.app")
 
@@ -134,7 +138,7 @@ class TFrameXRuntimeContext:
         self._app = app
         self.llm = llm # Context-level LLM
         self.context_memory = context_memory
-        self._agent_instances: Dict[str, BaseAgent] = {}
+        self.engine = Engine(app, self)
 
     async def __aenter__(self) -> "TFrameXRuntimeContext":
         llm_id = self.llm.model_id if self.llm else "None"
@@ -154,117 +158,6 @@ class TFrameXRuntimeContext:
         # Note: Agent-specific LLMs are not closed here; they are managed by the agent or assumed to share lifetime with context/app LLM.
         # If agent LLMs need explicit closing, agent's __del__ or a specific cleanup phase would handle it.
 
-    def _get_agent_instance(self, agent_name: str) -> BaseAgent:
-        if agent_name not in self._agent_instances:
-            if agent_name not in self._app._agents:
-                raise ValueError(f"Agent '{agent_name}' not registered with the TFrameXApp.")
-
-            reg_info = self._app._agents[agent_name]
-            agent_config_from_registration = reg_info["config"]
-
-            # Resolve LLM: Agent-specific > Context > App-default
-            agent_llm = agent_config_from_registration.get("llm_instance_override") or \
-                        self.llm or \
-                        self._app.default_llm
-            
-            agent_memory = agent_config_from_registration.get("memory_override") or \
-                           self._app.default_memory_store_factory()
-
-            agent_tools_resolved: List[Tool] = []
-            if agent_config_from_registration.get("tool_names"):
-                for tool_name_ref in agent_config_from_registration["tool_names"]:
-                    tool_obj = self._app.get_tool(tool_name_ref)
-                    if tool_obj:
-                        agent_tools_resolved.append(tool_obj)
-                    else:
-                        logger.warning(f"Tool '{tool_name_ref}' for agent '{agent_name}' not found.")
-
-            agent_description = agent_config_from_registration.get("description")
-            strip_think_tags_for_agent = agent_config_from_registration.get("strip_think_tags", False) # NEW
-
-            callable_agent_definitions: List[ToolDefinition] = []
-            callable_agent_names = agent_config_from_registration.get("callable_agent_names", [])
-            for sub_agent_name_to_call in callable_agent_names:
-                if sub_agent_name_to_call not in self._app._agents:
-                    logger.warning(f"Agent '{agent_name}' configured to call non-existent agent '{sub_agent_name_to_call}'. Skipping.")
-                    continue
-                sub_agent_reg_info = self._app._agents[sub_agent_name_to_call]
-                sub_agent_description = sub_agent_reg_info["config"].get("description") or \
-                                        f"This agent, '{sub_agent_name_to_call}', performs its designated role. Provide a specific input_message for it."
-                agent_tool_params = ToolParameters(
-                    properties={
-                        "input_message": ToolParameterProperty(
-                            type="string",
-                            description=f"The specific query, task, or input content to pass to the '{sub_agent_name_to_call}' agent."
-                        ),
-                    },
-                    required=["input_message"]
-                )
-                callable_agent_definitions.append(
-                    ToolDefinition(
-                        type="function",
-                        function={
-                            "name": sub_agent_name_to_call,
-                            "description": sub_agent_description,
-                            "parameters": agent_tool_params.model_dump(exclude_none=True)
-                        }
-                    )
-                )
-
-            instance_id = f"{agent_name}_ctx{id(self)}"
-            AgentClassToInstantiate: Type[BaseAgent] = agent_config_from_registration["agent_class_ref"]
-
-            # Keys handled explicitly when preparing agent_init_kwargs or are internal to registration
-            internal_config_keys = {
-                "llm_instance_override", "memory_override", "tool_names",
-                "system_prompt_template", "agent_class_ref", "description",
-                "callable_agent_names", "strip_think_tags" # NEW: Add strip_think_tags here
-            }
-            additional_constructor_args = {
-                k: v for k, v in agent_config_from_registration.items() if k not in internal_config_keys
-            }
-
-            if issubclass(AgentClassToInstantiate, LLMAgent) and not agent_llm:
-                 raise ValueError(f"Agent '{agent_name}' (type {AgentClassToInstantiate.__name__}) requires an LLM, but none was available.")
-
-            agent_init_kwargs = {
-                "agent_id": instance_id,
-                "description": agent_description,
-                "llm": agent_llm,
-                "tools": agent_tools_resolved,
-                "memory": agent_memory,
-                "system_prompt_template": agent_config_from_registration.get("system_prompt_template"),
-                "callable_agent_definitions": callable_agent_definitions,
-                "strip_think_tags": strip_think_tags_for_agent, # NEW: Pass to agent constructor
-                **additional_constructor_args
-            }
-            if issubclass(AgentClassToInstantiate, LLMAgent): # Or any agent needing runtime context
-                agent_init_kwargs["app_runtime_ref"] = self
-
-            self._agent_instances[agent_name] = AgentClassToInstantiate(**agent_init_kwargs)
-            logger.debug(
-                f"Instantiated agent '{instance_id}' (Type: {AgentClassToInstantiate.__name__}, "
-                f"LLM: {agent_llm.model_id if agent_llm else 'None'}, "
-                f"Strip Tags: {strip_think_tags_for_agent})" # NEW: Log strip_think_tags status
-            )
-        
-        return self._agent_instances[agent_name]
-
-    async def call_agent(self, agent_name: str, input_message: Union[str, Message], **kwargs: Any) -> Message:
-        if isinstance(input_message, str):
-            input_msg_obj = Message(role="user", content=input_message)
-        else:
-            input_msg_obj = input_message
-        agent_instance = self._get_agent_instance(agent_name)
-        return await agent_instance.run(input_msg_obj, **kwargs)
-
-    async def call_tool(self, tool_name: str, arguments_json_str: str) -> Any:
-        tool = self._app.get_tool(tool_name)
-        if not tool:
-            logger.error(f"Attempted to call unregistered tool '{tool_name}'.")
-            return {"error": f"Tool '{tool_name}' not found in app registry."}
-        return await tool.execute(arguments_json_str)
-
     async def run_flow(self, flow_ref: Union[str, Flow], 
                        initial_input: Message,
                        initial_shared_data: Optional[Dict[str, Any]] = None,
@@ -279,7 +172,7 @@ class TFrameXRuntimeContext:
             flow_to_run = flow_ref
         else:
             raise TypeError("flow_ref must be a flow name (str) or a Flow instance.")
-        return await flow_to_run.execute(initial_input, self, 
+        return await flow_to_run.execute(initial_input, self.engine, 
                                          initial_shared_data=initial_shared_data, 
                                          flow_template_vars=flow_template_vars)
 

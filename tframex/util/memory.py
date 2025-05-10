@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from tframex.primitives import Message
+from tframex.models.primitives import Message
 
 logger = logging.getLogger(__name__)
 
