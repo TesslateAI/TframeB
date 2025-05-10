@@ -4,7 +4,7 @@ from typing import Optional, List, Union, Dict, Any
 
 from .base import BaseAgent
 from tframex.llms import BaseLLMWrapper
-from tframex.tools import Tool, ToolDefinition # Added ToolDefinition
+from tframex.tools import Tool, ToolDefinition
 from tframex.memory import BaseMemoryStore
 from tframex.primitives import Message, ToolCall, FunctionCall
 # Forward declaration for TFrameXRuntimeContext
@@ -20,28 +20,30 @@ class LLMAgent(BaseAgent):
     """
     def __init__(self,
                  agent_id: str,
-                 llm: BaseLLMWrapper,
-                 app_runtime_ref: 'TFrameXRuntimeContext', # NEW
+                 llm: BaseLLMWrapper, # This is the actual resolved LLM the agent will use
+                 app_runtime_ref: 'TFrameXRuntimeContext',
                  description: Optional[str] = None,
                  tools: Optional[List[Tool]] = None,
                  memory: Optional[BaseMemoryStore] = None,
                  system_prompt_template: Optional[str] = "You are a helpful assistant.",
-                 callable_agent_definitions: Optional[List[ToolDefinition]] = None, # NEW
-                 max_tool_iterations: int = 5, # Increased default slightly
+                 callable_agent_definitions: Optional[List[ToolDefinition]] = None,
+                 strip_think_tags: bool = False, # NEW: Passed to BaseAgent
+                 max_tool_iterations: int = 5,
                  **config: Any):
         super().__init__(
             agent_id,
             description=description,
-            llm=llm,
+            llm=llm, # Pass the resolved LLM
             tools=tools,
             memory=memory,
             system_prompt_template=system_prompt_template,
-            callable_agent_definitions=callable_agent_definitions, # Pass to BaseAgent
-            **config
+            callable_agent_definitions=callable_agent_definitions,
+            strip_think_tags=strip_think_tags, # NEW: Pass to BaseAgent
+            **config # Pass other configs from decorator
         )
-        self.app_runtime = app_runtime_ref # NEW: Store runtime context reference
+        self.app_runtime = app_runtime_ref
         self.max_tool_iterations = max_tool_iterations
-        if not self.llm:
+        if not self.llm: # self.llm is inherited from BaseAgent and set by super()
             raise ValueError(f"LLMAgent '{self.agent_id}' requires an LLM instance.")
 
     async def run(self, input_message: Union[str, Message], **kwargs: Any) -> Message:
@@ -58,14 +60,13 @@ class LLMAgent(BaseAgent):
             history = await self.memory.get_history(limit=self.config.get("history_limit", 10))
             messages_for_llm: List[Message] = []
             
-            # Pass template_vars to _render_system_prompt
             system_message = self._render_system_prompt(**template_vars_for_prompt)
             if system_message:
                 messages_for_llm.append(system_message)
             
             messages_for_llm.extend(history)
 
-            llm_call_kwargs = {k: v for k, v in kwargs.items() if k != "template_vars"} # Exclude template_vars from direct LLM call
+            llm_call_kwargs = {k: v for k, v in kwargs.items() if k != "template_vars"}
 
             all_tool_definitions_for_llm: List[Dict[str, Any]] = []
             if self.tools:
@@ -73,7 +74,7 @@ class LLMAgent(BaseAgent):
                     [tool.get_openai_tool_definition().model_dump() for tool in self.tools.values()]
                 )
             
-            if self.callable_agent_definitions: # From BaseAgent, set during init
+            if self.callable_agent_definitions:
                 all_tool_definitions_for_llm.extend(
                     [cad.model_dump() for cad in self.callable_agent_definitions]
                 )
@@ -83,7 +84,8 @@ class LLMAgent(BaseAgent):
                 llm_call_kwargs["tool_choice"] = self.config.get("tool_choice", "auto")
 
             logger.debug(
-                f"Agent '{self.agent_id}' calling LLM (Iter {iteration_count+1}/{self.max_tool_iterations+1}). "
+                f"Agent '{self.agent_id}' (LLM: {self.llm.model_id}) calling LLM " # UPDATED LOG
+                f"(Iter {iteration_count+1}/{self.max_tool_iterations+1}). "
                 f"History depth: {len(history)}. "
                 f"Regular Tools defined: {len(self.tools)}. "
                 f"Callable Agents as Tools defined: {len(self.callable_agent_definitions)}."
@@ -96,7 +98,8 @@ class LLMAgent(BaseAgent):
 
             if not assistant_response_message.tool_calls or iteration_count >= self.max_tool_iterations:
                 logger.info(f"Agent '{self.agent_id}' concluding with textual response. Iter: {iteration_count+1}.")
-                return assistant_response_message
+                # NEW: Post-process before returning
+                return self._post_process_llm_response(assistant_response_message)
 
             logger.info(f"Agent '{self.agent_id}' LLM requested tool_calls: {len(assistant_response_message.tool_calls)}")
             
@@ -117,15 +120,12 @@ class LLMAgent(BaseAgent):
                     try:
                         sub_agent_args = json.loads(tool_args_json_str)
                         sub_agent_input_content = sub_agent_args.get("input_message", "")
-                        if not sub_agent_input_content and isinstance(sub_agent_args, str): # if {"input_message": ..} fails, use raw string if it's a string
+                        if not sub_agent_input_content and isinstance(sub_agent_args, str):
                             sub_agent_input_content = sub_agent_args
-                        elif not sub_agent_input_content and tool_args_json_str: # if content still empty, pass original args string
+                        elif not sub_agent_input_content and tool_args_json_str:
                             sub_agent_input_content = tool_args_json_str
 
-
                         sub_agent_input_msg = Message(role="user", content=str(sub_agent_input_content))
-                        
-                        # Pass template_vars from supervisor's kwargs to sub-agent if sub-agent uses them
                         sub_agent_call_kwargs = {"template_vars": template_vars_for_prompt}
 
                         sub_agent_response = await self.app_runtime.call_agent(
@@ -133,6 +133,7 @@ class LLMAgent(BaseAgent):
                             input_message=sub_agent_input_msg,
                             **sub_agent_call_kwargs
                         )
+                        # Sub-agent's response is already post-processed by its own .run() method if it's an LLMAgent
                         tool_result_content = sub_agent_response.content or "[Sub-agent produced no content]"
                         if sub_agent_response.tool_calls:
                             tc_summary = json.dumps([tc.model_dump(exclude_none=True) for tc in sub_agent_response.tool_calls])
@@ -157,4 +158,6 @@ class LLMAgent(BaseAgent):
                 await self.memory.add_message(tr_msg)
 
         logger.error(f"Agent '{self.agent_id}' exceeded max_tool_iterations ({self.max_tool_iterations}). Returning error message.")
-        return Message(role="assistant", content=f"Error: Agent {self.agent_id} exceeded maximum tool processing iterations.")
+        # NEW: Post-process error message too
+        error_message = Message(role="assistant", content=f"Error: Agent {self.agent_id} exceeded maximum tool processing iterations.")
+        return self._post_process_llm_response(error_message)

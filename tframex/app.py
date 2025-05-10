@@ -1,13 +1,13 @@
 import asyncio
 import inspect
 import logging
-import os # Added for os.getenv
+import os # Already present, used in __init__
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Union, Type
 
 from .llms import BaseLLMWrapper
-from .tools import Tool, ToolParameters, ToolParameterProperty, ToolDefinition # Added ToolDefinition
+from .tools import Tool, ToolParameters, ToolParameterProperty, ToolDefinition # ToolDefinition already present
 from .memory import BaseMemoryStore, InMemoryMemoryStore
-from .primitives import Message, MessageChunk
+from .primitives import Message, MessageChunk # MessageChunk already present
 from .agents.llm_agent import LLMAgent
 from .agents.base import BaseAgent
 from .agents.tool_agent import ToolAgent
@@ -53,7 +53,7 @@ class TFrameXApp:
             self._tools[tool_name] = Tool(
                 name=tool_name,
                 func=func,
-                description=description, # Passed to Tool constructor
+                description=description,
                 parameters_schema=parsed_params_schema
             )
             logger.debug(f"Registered tool: '{tool_name}'")
@@ -61,13 +61,14 @@ class TFrameXApp:
         return decorator
 
     def agent(self, name: Optional[str] = None,
-              description: Optional[str] = None,         # NEW
-              callable_agents: Optional[List[str]] = None, # NEW: list of agent names this agent can call
+              description: Optional[str] = None,
+              callable_agents: Optional[List[str]] = None,
               system_prompt: Optional[str] = None,
               tools: Optional[List[str]] = None,
-              llm: Optional[BaseLLMWrapper] = None,
+              llm: Optional[BaseLLMWrapper] = None, # This is the agent-specific LLM override
               memory_store: Optional[BaseMemoryStore] = None,
               agent_class: type[BaseAgent] = LLMAgent,
+              strip_think_tags: bool = False, # NEW: Agent-specific setting
               **agent_config: Any
               ) -> Callable:
         def decorator(target: Union[Callable, type]) -> Union[Callable, type]:
@@ -76,24 +77,32 @@ class TFrameXApp:
                 raise ValueError(f"Agent '{agent_name}' already registered.")
 
             final_config = {
-                "description": description, # NEW
-                "callable_agent_names": callable_agents or [], # NEW
+                "description": description,
+                "callable_agent_names": callable_agents or [],
                 "system_prompt_template": system_prompt,
                 "tool_names": tools or [],
-                "llm_override": llm,
+                "llm_instance_override": llm, # CHANGED key from llm_override
                 "memory_override": memory_store,
                 "agent_class_ref": agent_class,
-                **agent_config # Other agent-specific configs
+                "strip_think_tags": strip_think_tags, # NEW: Storing the setting
+                **agent_config
             }
 
             is_class_based_agent = inspect.isclass(target) and issubclass(target, BaseAgent)
+            agent_class_to_log = target.__name__ if is_class_based_agent else agent_class.__name__
 
             self._agents[agent_name] = {
                 "type": "custom_class_agent" if is_class_based_agent else "framework_managed_agent",
-                "ref": target, # The decorated function/class
+                "ref": target,
                 "config": final_config
             }
-            logger.debug(f"Registered agent: '{agent_name}' (Description: '{description}', Class: {agent_class.__name__ if not is_class_based_agent else target.__name__}, Callable Agents: {callable_agents or []})")
+            logger.debug(
+                f"Registered agent: '{agent_name}' (Description: '{description}', "
+                f"Class: {agent_class_to_log}, "
+                f"LLM Override: {llm.model_id if llm else 'None'}, "
+                f"Callable Agents: {callable_agents or []}, "
+                f"Strip Think Tags: {strip_think_tags})"
+            )
             return target
         return decorator
 
@@ -123,8 +132,8 @@ class TFrameXRuntimeContext:
     def __init__(self, app: TFrameXApp, llm: Optional[BaseLLMWrapper],
                  context_memory: Optional[BaseMemoryStore] = None):
         self._app = app
-        self.llm = llm
-        self.context_memory = context_memory # For the context itself, not directly for agents
+        self.llm = llm # Context-level LLM
+        self.context_memory = context_memory
         self._agent_instances: Dict[str, BaseAgent] = {}
 
     async def __aenter__(self) -> "TFrameXRuntimeContext":
@@ -134,11 +143,16 @@ class TFrameXRuntimeContext:
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        if self.llm:
+        # Close own LLM if it has a close method (some LLM wrappers might need this)
+        if self.llm and hasattr(self.llm, 'close') and inspect.iscoroutinefunction(self.llm.close):
             await self.llm.close()
-            logger.info(f"TFrameXRuntimeContext exited. LLM client closed for {self.llm.model_id}.")
+            logger.info(f"TFrameXRuntimeContext exited. Context LLM client closed for {self.llm.model_id}.")
+        elif self.llm:
+            logger.info(f"TFrameXRuntimeContext exited. Context LLM {self.llm.model_id} did not require async close.")
         else:
-            logger.info("TFrameXRuntimeContext exited. No LLM client to close.")
+            logger.info("TFrameXRuntimeContext exited. No context LLM client to close.")
+        # Note: Agent-specific LLMs are not closed here; they are managed by the agent or assumed to share lifetime with context/app LLM.
+        # If agent LLMs need explicit closing, agent's __del__ or a specific cleanup phase would handle it.
 
     def _get_agent_instance(self, agent_name: str) -> BaseAgent:
         if agent_name not in self._agent_instances:
@@ -148,8 +162,13 @@ class TFrameXRuntimeContext:
             reg_info = self._app._agents[agent_name]
             agent_config_from_registration = reg_info["config"]
 
-            agent_llm = agent_config_from_registration.get("llm_override") or self.llm or self._app.default_llm
-            agent_memory = agent_config_from_registration.get("memory_override") or self._app.default_memory_store_factory()
+            # Resolve LLM: Agent-specific > Context > App-default
+            agent_llm = agent_config_from_registration.get("llm_instance_override") or \
+                        self.llm or \
+                        self._app.default_llm
+            
+            agent_memory = agent_config_from_registration.get("memory_override") or \
+                           self._app.default_memory_store_factory()
 
             agent_tools_resolved: List[Tool] = []
             if agent_config_from_registration.get("tool_names"):
@@ -160,28 +179,24 @@ class TFrameXRuntimeContext:
                     else:
                         logger.warning(f"Tool '{tool_name_ref}' for agent '{agent_name}' not found.")
 
-            agent_description = agent_config_from_registration.get("description") # NEW
+            agent_description = agent_config_from_registration.get("description")
+            strip_think_tags_for_agent = agent_config_from_registration.get("strip_think_tags", False) # NEW
 
-            # NEW: Prepare ToolDefinitions for callable_agents
             callable_agent_definitions: List[ToolDefinition] = []
             callable_agent_names = agent_config_from_registration.get("callable_agent_names", [])
             for sub_agent_name_to_call in callable_agent_names:
                 if sub_agent_name_to_call not in self._app._agents:
                     logger.warning(f"Agent '{agent_name}' configured to call non-existent agent '{sub_agent_name_to_call}'. Skipping.")
                     continue
-
                 sub_agent_reg_info = self._app._agents[sub_agent_name_to_call]
-                # Use the registered description of the sub-agent
                 sub_agent_description = sub_agent_reg_info["config"].get("description") or \
                                         f"This agent, '{sub_agent_name_to_call}', performs its designated role. Provide a specific input_message for it."
-
                 agent_tool_params = ToolParameters(
                     properties={
                         "input_message": ToolParameterProperty(
                             type="string",
                             description=f"The specific query, task, or input content to pass to the '{sub_agent_name_to_call}' agent."
                         ),
-                        # "additional_context": ToolParameterProperty(type="object", description="Optional: Any additional structured context for the sub-agent.")
                     },
                     required=["input_message"]
                 )
@@ -189,71 +204,72 @@ class TFrameXRuntimeContext:
                     ToolDefinition(
                         type="function",
                         function={
-                            "name": sub_agent_name_to_call, # The agent's name becomes the tool/function name
+                            "name": sub_agent_name_to_call,
                             "description": sub_agent_description,
                             "parameters": agent_tool_params.model_dump(exclude_none=True)
                         }
                     )
                 )
-            logger.debug(f"Agent '{agent_name}' will be instantiated with {len(callable_agent_definitions)} callable agents as tools: {[cad.function['name'] for cad in callable_agent_definitions]}")
-
 
             instance_id = f"{agent_name}_ctx{id(self)}"
             AgentClassToInstantiate: Type[BaseAgent] = agent_config_from_registration["agent_class_ref"]
 
-            constructor_args_for_agent = {
-                k: v for k, v in agent_config_from_registration.items()
-                if k not in {"llm_override", "memory_override", "tool_names", "system_prompt_template",
-                             "agent_class_ref", "description", "callable_agent_names"}
+            # Keys handled explicitly when preparing agent_init_kwargs or are internal to registration
+            internal_config_keys = {
+                "llm_instance_override", "memory_override", "tool_names",
+                "system_prompt_template", "agent_class_ref", "description",
+                "callable_agent_names", "strip_think_tags" # NEW: Add strip_think_tags here
+            }
+            additional_constructor_args = {
+                k: v for k, v in agent_config_from_registration.items() if k not in internal_config_keys
             }
 
             if issubclass(AgentClassToInstantiate, LLMAgent) and not agent_llm:
                  raise ValueError(f"Agent '{agent_name}' (type {AgentClassToInstantiate.__name__}) requires an LLM, but none was available.")
 
-            # Prepare args for agent constructor
             agent_init_kwargs = {
                 "agent_id": instance_id,
-                "description": agent_description, # Pass agent's own description
+                "description": agent_description,
                 "llm": agent_llm,
                 "tools": agent_tools_resolved,
                 "memory": agent_memory,
                 "system_prompt_template": agent_config_from_registration.get("system_prompt_template"),
-                "callable_agent_definitions": callable_agent_definitions, # Pass definitions of agents it can call
-                **constructor_args_for_agent # Pass through other configs
+                "callable_agent_definitions": callable_agent_definitions,
+                "strip_think_tags": strip_think_tags_for_agent, # NEW: Pass to agent constructor
+                **additional_constructor_args
             }
-            # LLMAgent (and others if they need it) specifically need app_runtime_ref
-            if issubclass(AgentClassToInstantiate, LLMAgent): # Or any agent that needs to call sub-agents
+            if issubclass(AgentClassToInstantiate, LLMAgent): # Or any agent needing runtime context
                 agent_init_kwargs["app_runtime_ref"] = self
 
-
             self._agent_instances[agent_name] = AgentClassToInstantiate(**agent_init_kwargs)
-            logger.debug(f"Instantiated agent '{instance_id}' (Type: {AgentClassToInstantiate.__name__}) for context.")
-
+            logger.debug(
+                f"Instantiated agent '{instance_id}' (Type: {AgentClassToInstantiate.__name__}, "
+                f"LLM: {agent_llm.model_id if agent_llm else 'None'}, "
+                f"Strip Tags: {strip_think_tags_for_agent})" # NEW: Log strip_think_tags status
+            )
+        
         return self._agent_instances[agent_name]
 
     async def call_agent(self, agent_name: str, input_message: Union[str, Message], **kwargs: Any) -> Message:
-        # kwargs here can include 'template_vars' for the agent's system prompt
         if isinstance(input_message, str):
             input_msg_obj = Message(role="user", content=input_message)
         else:
             input_msg_obj = input_message
-
         agent_instance = self._get_agent_instance(agent_name)
         return await agent_instance.run(input_msg_obj, **kwargs)
 
     async def call_tool(self, tool_name: str, arguments_json_str: str) -> Any:
-        # ... (no changes to this method)
         tool = self._app.get_tool(tool_name)
         if not tool:
             logger.error(f"Attempted to call unregistered tool '{tool_name}'.")
             return {"error": f"Tool '{tool_name}' not found in app registry."}
         return await tool.execute(arguments_json_str)
 
-    async def run_flow(self, flow_ref: Union[str, Flow],
+    async def run_flow(self, flow_ref: Union[str, Flow], 
                        initial_input: Message,
                        initial_shared_data: Optional[Dict[str, Any]] = None,
-                       flow_template_vars: Optional[Dict[str, Any]] = None # NEW: For passing template_vars to agents in flow
-                       ) -> FlowContext:
+                       flow_template_vars: Optional[Dict[str, Any]] = None
+                       ) -> FlowContext: 
         flow_to_run: Optional[Flow] = None
         if isinstance(flow_ref, str):
             flow_to_run = self._app.get_flow(flow_ref)
@@ -263,29 +279,11 @@ class TFrameXRuntimeContext:
             flow_to_run = flow_ref
         else:
             raise TypeError("flow_ref must be a flow name (str) or a Flow instance.")
-
-        # Pass flow_template_vars to the flow's execute method
-        return await flow_to_run.execute(
-            initial_input,
-            self,
-            initial_shared_data=initial_shared_data,
-            flow_template_vars=flow_template_vars
-        )
+        return await flow_to_run.execute(initial_input, self, 
+                                         initial_shared_data=initial_shared_data, 
+                                         flow_template_vars=flow_template_vars)
 
     async def interactive_chat(self, default_flow_name: Optional[str] = None) -> None:
-        # ... (interactive chat main loop)
-        # Inside the loop, when calling run_flow:
-        # final_flow_context: FlowContext = await self.run_flow(
-        #     flow_to_use,
-        #     initial_message,
-        #     flow_template_vars={"user_name": "InteractiveUser"} # Example
-        # )
-        # This is just an example of how flow_template_vars might be used.
-        # The actual interactive_chat logic remains largely the same. I will omit the full code for brevity here,
-        # but the key change is the potential to pass flow_template_vars if desired.
-        # For now, I'll keep interactive_chat as it was, without explicitly using flow_template_vars
-        # as it requires more thought on how user would specify them interactively.
-
         print("\n--- TFrameX Interactive Flow Chat ---")
         
         flow_to_use: Optional[Flow] = None
@@ -350,12 +348,7 @@ class TFrameXRuntimeContext:
                 initial_message = Message(role="user", content=user_input_str)
                 
                 logger.info(f"CLI: Running flow '{flow_to_use.flow_name}' with input: '{user_input_str}'")
-                
-                # Example of passing template_vars if the flow/agents are designed for it
-                # flow_specific_vars = {"session_id": "cli_chat_123"}
-                # final_flow_context: FlowContext = await self.run_flow(flow_to_use, initial_message, flow_template_vars=flow_specific_vars)
                 final_flow_context: FlowContext = await self.run_flow(flow_to_use, initial_message)
-
 
                 final_output_message = final_flow_context.current_message
                 

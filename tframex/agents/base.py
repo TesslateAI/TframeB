@@ -1,9 +1,10 @@
 import logging
+import re # For stripping think tags
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any, Union
 
 from tframex.llms import BaseLLMWrapper
-from tframex.tools import Tool, ToolDefinition # Added ToolDefinition
+from tframex.tools import Tool, ToolDefinition
 from tframex.memory import BaseMemoryStore, InMemoryMemoryStore
 from tframex.primitives import Message
 
@@ -15,35 +16,37 @@ agent_internal_debug_logger.setLevel(logging.DEBUG)
 class BaseAgent(ABC):
     def __init__(self,
                  agent_id: str,
-                 description: Optional[str] = None, # NEW
-                 llm: Optional[BaseLLMWrapper] = None,
+                 description: Optional[str] = None,
+                 llm: Optional[BaseLLMWrapper] = None, # This will be the resolved LLM for this agent instance
                  tools: Optional[List[Tool]] = None,
                  memory: Optional[BaseMemoryStore] = None,
                  system_prompt_template: Optional[str] = None,
-                 callable_agent_definitions: Optional[List[ToolDefinition]] = None, # NEW
+                 callable_agent_definitions: Optional[List[ToolDefinition]] = None,
+                 strip_think_tags: bool = False, # True to remove, False to keep. (Default: False means keep)
                  **config: Any):
         self.agent_id = agent_id
-        self.description = description or f"Agent performing its designated role: {agent_id.split('_ctx')[0]}" # NEW, cleaner default
-        self.llm = llm
+        self.description = description or f"Agent performing its designated role: {agent_id.split('_ctx')[0]}"
+        self.llm = llm # The specific LLM instance this agent will use
         self.tools: Dict[str, Tool] = {tool.name: tool for tool in tools} if tools else {}
         self.memory: BaseMemoryStore = memory or InMemoryMemoryStore()
         self.system_prompt_template = system_prompt_template
-        # Store callable agent definitions if this agent is a supervisor
-        self.callable_agent_definitions: List[ToolDefinition] = callable_agent_definitions or [] # NEW
+        self.callable_agent_definitions: List[ToolDefinition] = callable_agent_definitions or []
+        self.strip_think_tags = strip_think_tags
         self.config = config
 
         agent_internal_debug_logger.debug(
             f"[{self.agent_id}] BaseAgent.__init__ called. Description: '{self.description}'. "
-            f"LLM: {llm.model_id if llm else 'None'}. Tools: {list(self.tools.keys())}. "
-            f"Callable Agents: {[cad.function['name'] for cad in self.callable_agent_definitions]}. " # NEW log
-            f"System Prompt: {bool(system_prompt_template)}. Config: {config}"
+            f"LLM: {self.llm.model_id if self.llm else 'None'}. Tools: {list(self.tools.keys())}. "
+            f"Callable Agents: {[cad.function['name'] for cad in self.callable_agent_definitions]}. "
+            f"Strip Think Tags: {self.strip_think_tags}. "
+            f"System Prompt: {bool(system_prompt_template)}. Config: {self.config}"
         )
         logger.info(
-            f"Agent '{agent_id}' initialized. LLM: {llm.model_id if llm else 'None'}. "
+            f"Agent '{agent_id}' initialized. LLM: {self.llm.model_id if self.llm else 'None'}. "
             f"Tools: {list(self.tools.keys())}. "
-            f"Callable Agents: {[cad.function['name'] for cad in self.callable_agent_definitions]}." # NEW log
+            f"Callable Agents: {[cad.function['name'] for cad in self.callable_agent_definitions]}. "
+            f"Strip Think Tags: {self.strip_think_tags}."
         )
-
 
     def _render_system_prompt(self, **kwargs_for_template: Any) -> Optional[Message]:
         agent_internal_debug_logger.debug(f"[{self.agent_id}] _render_system_prompt called. Template: '{self.system_prompt_template}', Args: {kwargs_for_template}")
@@ -51,19 +54,15 @@ class BaseAgent(ABC):
             agent_internal_debug_logger.debug(f"[{self.agent_id}] No system_prompt_template defined.")
             return None
         try:
-            # Prepare description of available tools and callable agents for the system prompt if placeholders exist
             prompt_format_args = kwargs_for_template.copy()
-
             tool_descriptions = "\n".join(
                 [f"- {name}: {tool.description}" for name, tool in self.tools.items()]
             )
             prompt_format_args["available_tools_descriptions"] = tool_descriptions or "No tools available."
-
             callable_agent_tool_descs = "\n".join(
                 [f"- {cad.function['name']}: {cad.function['description']}" for cad in self.callable_agent_definitions]
             )
             prompt_format_args["available_agents_descriptions"] = callable_agent_tool_descs or "No callable agents available."
-
 
             content = self.system_prompt_template.format(**prompt_format_args)
             msg = Message(role="system", content=content)
@@ -72,13 +71,25 @@ class BaseAgent(ABC):
         except KeyError as e:
             agent_internal_debug_logger.warning(f"[{self.agent_id}] Missing key '{e}' for system_prompt_template. Template: '{self.system_prompt_template}'")
             logger.warning(f"Agent '{self.agent_id}': Missing key '{e}' for system_prompt_template. Template: '{self.system_prompt_template}'")
-            # Return unformatted, still useful for debugging, but try a simple format first
             try:
-                content = self.system_prompt_template.format(**kwargs_for_template) # Try without tool/agent descriptions
+                content = self.system_prompt_template.format(**kwargs_for_template)
                 return Message(role="system", content=content)
-            except KeyError: # Still fails, return raw
+            except KeyError:
                  return Message(role="system", content=self.system_prompt_template)
 
+    def _post_process_llm_response(self, message: Message) -> Message:
+        """Applies post-processing to the LLM response, like stripping think tags."""
+        if self.strip_think_tags and message.content:
+            # Using regex to remove <think>...</think> blocks, including newlines within them
+            # re.DOTALL makes . match newlines as well
+            # Non-greedy match .*? is important
+            original_content = message.content
+            processed_content = re.sub(r"<think>.*?</think>\s*", "", original_content, flags=re.DOTALL).strip()
+            if processed_content != original_content:
+                agent_internal_debug_logger.debug(f"[{self.agent_id}] Stripped think tags. Original length: {len(original_content)}, Processed length: {len(processed_content)}")
+                logger.debug(f"Agent '{self.agent_id}': Stripped think tags. Original: '{original_content[:100]}...', Processed: '{processed_content[:100]}...'")
+            message.content = processed_content
+        return message
 
     @abstractmethod
     async def run(self, input_message: Union[str, Message], **kwargs: Any) -> Message:
