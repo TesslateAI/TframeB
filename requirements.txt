@@ -1,0 +1,16 @@
+python-dotenv>=1.0.0
+openai>=1.0.0
+typing-extensions>=4.5.0
+pydantic>=2.0.0
+asyncio>=3.4.3
+aiohttp>=3.8.0
+python-json-logger>=2.0.0
+colorama>=0.4.6
+httpx>=0.24.0
+json-logger>=0.2.0
+pyyaml>=6.0.1
+
+# Development dependencies
+black>=23.0.0
+isort>=5.12.0
+pre-commit>=3.3.0
