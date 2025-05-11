@@ -1,16 +1,15 @@
 import logging
 import json
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional, List, Union, Dict, Any, TYPE_CHECKING
 
 from .base import BaseAgent
 from tframex.util.llms import BaseLLMWrapper
 from tframex.util.tools import Tool, ToolDefinition
 from tframex.util.memory import BaseMemoryStore
 from tframex.models.primitives import Message, ToolCall, FunctionCall
-# Forward declaration for TFrameXRuntimeContext
-if False: # TYPE_CHECKING
-    from tframex.app import TFrameXRuntimeContext
 
+if TYPE_CHECKING:
+    from tframex.util.engine import Engine
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,7 @@ class LLMAgent(BaseAgent):
     def __init__(self,
                  agent_id: str,
                  llm: BaseLLMWrapper, # This is the actual resolved LLM the agent will use
-                 app_runtime_ref: 'TFrameXRuntimeContext',
+                 engine: 'Engine',
                  description: Optional[str] = None,
                  tools: Optional[List[Tool]] = None,
                  memory: Optional[BaseMemoryStore] = None,
@@ -41,7 +40,7 @@ class LLMAgent(BaseAgent):
             strip_think_tags=strip_think_tags, # NEW: Pass to BaseAgent
             **config # Pass other configs from decorator
         )
-        self.app_runtime = app_runtime_ref
+        self.engine = engine
         self.max_tool_iterations = max_tool_iterations
         if not self.llm: # self.llm is inherited from BaseAgent and set by super()
             raise ValueError(f"LLMAgent '{self.agent_id}' requires an LLM instance.")
@@ -128,7 +127,7 @@ class LLMAgent(BaseAgent):
                         sub_agent_input_msg = Message(role="user", content=str(sub_agent_input_content))
                         sub_agent_call_kwargs = {"template_vars": template_vars_for_prompt}
 
-                        sub_agent_response = await self.app_runtime.call_agent(
+                        sub_agent_response = await self.engine.call_agent(
                             agent_name=tool_name,
                             input_message=sub_agent_input_msg,
                             **sub_agent_call_kwargs

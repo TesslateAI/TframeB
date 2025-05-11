@@ -1,11 +1,14 @@
 import logging
 import inspect
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union, TYPE_CHECKING
 
 from ..models.primitives import Message
 from ..util.tools import Tool, ToolDefinition, ToolParameterProperty, ToolParameters
 from ..agents.base import BaseAgent
-from ..agents.llm_agent import LLMAgent
+from ..agents.llm_agent import LLMAgent  # Import LLMAgent directly since we need it for runtime
+
+if TYPE_CHECKING:
+    from ..agents.llm_agent import LLMAgent
 
 logger = logging.getLogger("tframex.engine")
 
@@ -112,7 +115,7 @@ class Engine:
                 **additional_constructor_args
             }
             if issubclass(AgentClassToInstantiate, LLMAgent):
-                agent_init_kwargs["app_runtime_ref"] = self._runtime_context
+                agent_init_kwargs["engine"] = self
 
             self._agent_instances[agent_name] = AgentClassToInstantiate(**agent_init_kwargs)
             logger.debug(
